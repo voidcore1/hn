@@ -1,49 +1,28 @@
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
-from fetcher import (
-    search_hn_stories,
-    get_hn_item,
-    fetch_comment_tree,
-    stats,
-)
-from chunker import (
-    build_thread_document_chunked,
-    count_comments_in_tree,
-)
+from fetcher import search_hn_stories, get_hn_item, fetch_comment_tree, stats
+from chunker import build_thread_document_chunked, count_comments_in_tree
 from digest import generate_digest
 from chat import chat_loop
 
 
-# ---------------- DATA PERSISTENCE ---------------- #
-
 def save_fetched_data(query, stories_meta, all_trees, filepath="hn_data.json"):
-    """
-    Save all fetched data to a JSON file.
-
-    Purposes:
-      1. Avoids re-fetching hundreds of comments during development/testing.
-      2. Serves as an auditable artifact — shows exactly what was pulled
-         from the API, what was kept, and what was discarded.
-      3. Could be loaded by a future version to skip the fetch step.
-    """
+    """Dump everything to JSON so we don't re-fetch while developing."""
     payload = {
         "query": query,
-        "fetched_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "fetched_at": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "stats": dict(stats),
         "stories": stories_meta,
         "comment_trees": all_trees,
     }
-
     with open(filepath, "w") as f:
         json.dump(payload, f, indent=2)
-
     print(f"💾 Data saved to {filepath}")
 
 
 def print_audit(query, story_summaries):
-    """Print the Stage 1 data audit to the console."""
     print("\n" + "=" * 50)
     print("📊 DATA AUDIT")
     print("=" * 50)
@@ -62,15 +41,12 @@ def print_audit(query, story_summaries):
               f"{s['threads_fetched']} top threads, "
               f"{s['total_in_trees']} comments in trees")
 
-    print(f"\nNote: HN Firebase API does not expose per-comment upvote counts.")
-    print(f"Story-level points are used to prioritize high-signal threads.")
-    print(f"Comment ordering relies on HN's default sort (roughly by votes).")
+    # worth noting for the audit
+    print(f"\nNote: HN Firebase API doesn't expose per-comment upvotes.")
+    print(f"We use story-level points to prioritize and HN's default sort order.")
 
-
-# ---------------- MAIN ---------------- #
 
 def main():
-    # --- user input ---
     query = input(
         "🔍 Enter search topic (or press Enter for 'SQLite in production'): "
     ).strip()
@@ -79,16 +55,13 @@ def main():
 
     print(f"\n📡 Searching HN for: \"{query}\"\n")
 
-    # --- fetch top stories ---
     stories = search_hn_stories(query, num_stories=5)
-
     if not stories:
         print("❌ No stories found.")
         sys.exit(1)
 
     print(f"Found {len(stories)} stories. Fetching comments...\n")
 
-    # char budget per story for smart chunking (total ~15k across all stories)
     per_story_budget = 15000 // len(stories)
 
     all_documents = ""
@@ -99,22 +72,19 @@ def main():
         title = story.get("title", "Untitled")
         story_id = story.get("objectID")
         points = story.get("points", 0)
-        url = story.get("url") or ""  # None for Ask HN / Show HN posts
+        url = story.get("url") or ""
         num_comments = story.get("num_comments", 0)
 
         print(f"  [{i+1}] \"{title}\" ({points} pts, {num_comments} comments)")
-
         stats["stories_fetched"] += 1
 
         item_data = get_hn_item(story_id)
-
         if not item_data or "kids" not in item_data:
             print(f"      ⏭️  No comments, skipping.")
             continue
 
         stats["stories_with_comments"] += 1
 
-        # fetch top-level comment threads (up to 15 per story)
         trees = []
         top_comment_ids = item_data["kids"][:15]
 
@@ -123,7 +93,7 @@ def main():
             tree = fetch_comment_tree(cid)
             if tree:
                 trees.append(tree)
-        print()  # newline after progress dots
+        print()
 
         if trees:
             doc = build_thread_document_chunked(title, url, trees, per_story_budget)
@@ -135,7 +105,6 @@ def main():
                 "story_points": points,
                 "trees": trees,
             })
-
             story_summaries.append({
                 "title": title,
                 "points": points,
@@ -143,7 +112,7 @@ def main():
                 "total_in_trees": sum(count_comments_in_tree(t) for t in trees),
             })
 
-    # --- save raw data to JSON ---
+    # save raw data
     stories_meta = [
         {
             "title": s.get("title"),
@@ -154,19 +123,16 @@ def main():
         }
         for s in stories
     ]
-
     save_fetched_data(query, stories_meta, all_trees_serializable)
 
-    # --- print audit ---
+    # audit
     print_audit(query, story_summaries)
 
-    # --- generate digest ---
     if not all_documents.strip():
         print("\n❌ No comment data to generate digest from.")
         sys.exit(1)
 
-    print(f"\nTotal document size: {len(all_documents)} chars "
-          f"(budget: 15000 chars, chunked at thread boundaries)")
+    print(f"\nDocument size: {len(all_documents)} chars (chunked at thread boundaries)")
     print("\n🤖 Generating digest...\n")
 
     digest = generate_digest(all_documents)
@@ -177,7 +143,7 @@ def main():
     print(digest)
     print("\n" + "=" * 50)
 
-    # --- start chat ---
+    # chat
     chat_loop(digest, all_documents)
 
 

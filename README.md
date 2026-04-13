@@ -1,141 +1,91 @@
-# HN Thread Intelligence Tool
+# hn-thread-intel
 
-A command-line tool that fetches Hacker News discussions on any topic, generates a structured technical digest, and lets you chat with the data to explore specific points.
+CLI tool that pulls Hacker News discussions on a topic, generates a useful technical digest, and lets you chat with the data afterward.
 
-## Quick Start
+## Setup
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/hn-digest.git
-cd hn-digest
-
-# 2. Install dependencies
+git clone https://github.com/YOUR_USERNAME/hn-thread-intel.git
+cd hn-thread-intel
 pip install -r requirements.txt
+```
 
-# 3. Set up your API key
+Get a free Groq API key from https://console.groq.com/keys, then:
+
+```bash
 cp .env.example .env
-# Edit .env and paste your Groq API key (free at https://console.groq.com/keys)
+```
 
-# 4. Run
+Open `.env` and paste your key there.
+
+## Usage
+
+```bash
 python main.py
 ```
 
-You'll be prompted for a search topic. Press Enter to use the default ("SQLite in production").
+It'll ask for a search topic — press Enter for the default ("SQLite in production"). Fetching takes a couple minutes because of API rate limiting. After that you get the data audit, a structured digest, and then a chat where you can ask follow-ups.
 
 ## Project Structure
 
-```
-hn-digest/
-├── main.py            # Entry point — orchestrates all stages
-├── config.py          # Loads .env, initializes Groq client
-├── fetcher.py         # HN API calls, comment tree building, stats
-├── chunker.py         # Flatten trees, smart chunking, document building
-├── digest.py          # LLM prompt engineering and digest generation
-├── chat.py            # Conversational follow-up (Stage 4)
-├── requirements.txt
-├── .env.example       # Template for API key
-├── .gitignore
-└── README.md
-```
+- `main.py` — entry point, runs everything in order
+- `config.py` — loads env vars, sets up Groq client
+- `fetcher.py` — talks to the HN APIs, builds comment trees
+- `chunker.py` — flattens trees into text, handles chunking
+- `digest.py` — builds the prompt and calls the LLM
+- `chat.py` — interactive follow-up chat
 
-## How It Works
+## Design Decisions
 
-### Stage 1: Data Acquisition & Audit
+### Stage 1: Data Acquisition
 
-**What we fetch:**
-- Top 5 stories for the query, sorted by points (community signal).
-- Up to 15 top-level comment threads per story, recursed to depth 5.
+I fetch the top 5 stories (sorted by points) and up to 15 top-level comment threads per story, recursing to depth 5. Everything gets saved to `hn_data.json` so I don't have to re-fetch every time during development.
 
-**What we discard and why:**
-- **Deleted/dead comments**: These are moderated out by HN — no useful content.
-- **Empty comments**: Some comments have no text body (just children). We skip the node but still recurse into children, since replies may have substance.
-- **Deep nesting beyond depth 5**: Deeply nested replies are usually tangential arguments. Capping depth keeps the data focused.
+What gets thrown out:
+- **Deleted/dead comments** — moderated away, no useful content
+- **Empty comments** — some have no text body, just children. I skip the node but still recurse into kids since replies might have substance
+- **Threads deeper than 5 levels** — usually tangential flamewars at that point
 
-**What we store:**
-- All fetched data (stories, full comment trees with metadata) is saved to `hn_data.json` for auditability and to avoid re-fetching during development.
+One thing I couldn't get: the HN Firebase API doesn't give you upvote counts on individual comments (only stories have a `score` field). I work around this by sorting stories by points and relying on HN's default ordering of the `kids` array, which roughly maps to community ranking.
 
-**Upvote limitation:**
-The HN Firebase API (`/v0/item/{id}.json`) does not return a score field for individual comments — only stories have `score`. This is a known API limitation. We compensate by:
-1. Sorting stories by points to prioritize high-signal threads.
-2. Relying on HN's default `kids` array ordering, which roughly corresponds to community ranking.
+### Stage 2: Chunking
 
-The audit prints a per-story breakdown showing points, threads fetched, and comment counts, plus totals for valid/deleted/empty comments.
+The big problem with HN data is that comments are trees — if you just slice at a character count, you break comments in half and lose the "who's replying to whom" context. My approach:
 
-### Stage 2: Chunking & Structure
+- Each comment gets flattened with a `[depth=N]` tag, author, and timestamp
+- When building the document for the LLM, I add **complete threads** until the character budget is hit. If a thread doesn't fit, I skip it entirely instead of cutting it
+- Total budget (15k chars) is split across stories so one big thread doesn't eat everything
 
-**The problem:** HN comments are a tree structure (replies nested under replies). Naive token-count splitting would cut comments in half and destroy the "who is replying to whom" context that makes discussions meaningful.
+The tradeoff is some threads get dropped, but a clean subset beats a corrupted full set.
 
-**Our strategy — thread-boundary chunking:**
-1. Each comment is flattened with explicit metadata: `[depth=N] Author: name | timestamp`.
-2. Indentation visually mirrors reply depth.
-3. When building the document for the LLM, we add **complete top-level threads** one at a time until the character budget is reached. If a thread doesn't fit in the remaining space, it's skipped entirely — never sliced.
-4. The total budget (15,000 chars) is split evenly across stories so no single story dominates.
+### Stage 3: Digest
 
-This means every comment the LLM sees is complete, and every reply chain is intact. The tradeoff is that some threads may be dropped if they're too large, but a complete subset is better than a corrupted full set.
+The LLM prompt asks for five specific sections: consensus points, controversial takes, pros/cons from real experiences, alternatives mentioned, and notable insights. I explain the data format in the prompt (what depth tags mean, the upvote limitation) so the model knows what it's working with.
 
-**What we preserve per comment:**
-- **Thread depth**: `[depth=0]` = top-level, `[depth=1]` = reply, etc. Lets the LLM understand argument structure.
-- **Timestamps**: Formatted as `YYYY-MM-DD HH:MM UTC`. Useful for the LLM to weigh recency.
-- **Author names**: Allows the LLM to attribute viewpoints and notice when the same person makes multiple points.
+Model fallback: if the primary model (llama-3.3-70b) is rate-limited on Groq's free tier, it tries mixtral-8x7b, then llama-3.1-8b.
 
-### Stage 3: Generating the Digest
+### Stage 4: Chat
 
-The LLM prompt:
-- Explains the data format (what depth tags and timestamps mean).
-- Notes the upvote limitation so the model doesn't hallucinate popularity signals.
-- Requests five specific output sections: Key Consensus, Controversial Takes, Pros & Cons, Tools & Alternatives, and Notable Insights.
-- Instructs the model to paraphrase rather than quote, and to reference specific users.
+After the digest, you can ask follow-up questions like "what did they say about write performance?" The system is grounded — the model only answers from the actual HN data, and if something isn't there, it says so.
 
-We use a model fallback chain (llama-3.3-70b → mixtral-8x7b → llama-3.1-8b) because Groq's free tier can rate-limit any single model. The fallback ensures the tool doesn't fail just because one model is busy.
+Context management: I use a sliding window of the last 6 messages. The digest + a trimmed chunk of raw thread data are always in the system prompt. I went with sliding window over summarization because it's simpler and avoids compounding errors from summarizing summaries. For a short research chat, 6 turns is plenty.
 
-### Stage 4: Conversational Chat (Brownie Points)
+### Stage 5: Edge Cases
 
-After the digest is printed, the user enters an interactive chat loop where they can ask follow-up questions like "What did they say about write performance?" or "Which commenters had actual production experience?"
+Handled through the system prompt:
+- **No answer in data** — model is told to say "not covered in the threads"
+- **Contradictory opinions** — model presents both sides
+- **False consensus manipulation** — model pushes back and cites actual data
+- **Old chat references** — sliding window keeps recent turns; older ones drop off (acknowledged tradeoff)
 
-**Context management — sliding window:**
-- The system prompt always includes the full digest + a trimmed portion of raw thread data (8,000 chars, cut at story boundaries — not mid-comment).
-- Chat history keeps the last 6 messages (user + assistant turns). Older messages are dropped FIFO.
+## Known Limitations
 
-**Why sliding window over summarization?**
-- Simpler to implement and debug — no risk of summarization errors compounding.
-- For a focused research conversation, 6 turns of context covers most use cases.
-- Predictable token usage: the context size never surprises us.
-- The tradeoff: if the user references something from 10 turns ago, it may be lost. This is documented and acceptable for a research chat tool.
-
-**Grounding rules in the system prompt:**
-- The model is told to answer ONLY from the provided data.
-- If the answer isn't in the data, it must say so (prevents hallucination).
-- If opinions are contradictory, it must present both sides.
-- If a question tries to manufacture false consensus, the model pushes back.
-
-### Stage 5: Edge Cases (Brownie Points)
-
-These are handled via the system prompt and chat design:
-
-| Scenario | How it's handled |
-|---|---|
-| No answer in data | System prompt instructs model to say "this isn't covered in the fetched threads" |
-| Contradictory opinions | System prompt requires presenting both sides fairly |
-| Reference to old chat message | Sliding window keeps last 6 messages; older ones are dropped (acknowledged tradeoff) |
-| Manipulative false consensus | System prompt tells model to cite actual data diversity and push back |
-
-## Known Limitations & Tradeoffs
-
-- **Fetching speed**: With rate limiting (0.15s per API call), fetching 5 stories × 15 threads can take 2–5 minutes depending on thread sizes. Progress dots are printed so the user knows it's working.
-- **No per-comment upvotes**: API limitation. We use story-level points and HN's default ordering as a proxy.
-- **Fixed char budgets**: The 15,000 char digest budget and 8,000 char chat budget are tuned for Groq's context limits on the models we use. Larger models could use more.
-- **Sliding window memory loss**: Chat turns older than 6 messages are forgotten. For longer research sessions, a summarization approach would be better but adds complexity.
-- **Single query**: The tool processes one search query per run. Comparing multiple topics would require running it twice.
-
-## Demo
-
-The demo recording shows the tool running with the query "SQLite in production", including the data audit, generated digest, and a few chat follow-up questions.
+- Fetching is slow (~2-5 min) because of rate limiting. Progress dots show it's working.
+- No per-comment upvotes (API limitation, documented above).
+- Chat forgets messages older than 6 turns.
+- Fixed character budgets tuned for Groq's context limits — could use more with bigger models.
+- One query per run.
 
 ## Tech Stack
 
-- **Python 3** — standard library + minimal dependencies
-- **Groq API** — fast LLM inference (free tier, llama-3.3-70b primary model)
-- **HN Algolia API** — story search
-- **HN Firebase API** — comment/item fetching
-- **BeautifulSoup** — HTML cleaning for comment text
-- **python-dotenv** — environment variable management
+Python 3, Groq API (free tier), HN Algolia + Firebase APIs, BeautifulSoup, python-dotenv
