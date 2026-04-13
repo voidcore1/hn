@@ -7,7 +7,7 @@ I built this because HN threads are genuinely useful for making tech decisions, 
 ## Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hn.git
+git clone https://github.com/voidcore1/hn.git
 cd hn
 pip install -r requirements.txt
 ```
