@@ -98,7 +98,7 @@ The one gap is very old chat references (past the 6-message window) — those fa
 
 ## Demo
 
-[LINK TO DEMO VIDEO]
+https://youtu.be/pEvVFG8CKtw
 
 ## Tech
 
