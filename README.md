@@ -3,6 +3,9 @@
 A CLI tool that searches Hacker News threads on any topic, pulls the comments, generates a structured digest of what the community actually thinks, and then lets you chat with the data to dig deeper.
 
 I built this because HN threads are genuinely useful for making tech decisions, but reading through hundreds of comments to find the good stuff is painful. This automates that.
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/pEvVFG8CKtw/maxresdefault.jpg)](https://youtu.be/pEvVFG8CKtw)
 
 ## Setup
 
