@@ -30,7 +30,7 @@ Open `.env` and put your key in there. This file is gitignored so it won't get p
 python main.py
 ```
 
-It asks for a topic — hit Enter to go with "SQLite in production". Fetching comments takes a couple minutes because I rate-limit API calls to not get blocked. You'll see progress dots while it works.
+It asks for a topic, hit Enter to go with "SQLite in production". Fetching comments takes a couple minutes because I rate-limit API calls to not get blocked. You'll see progress dots while it works.
 
 After fetching, it prints a data audit, then the digest, then drops you into a chat where you can ask follow-ups.
 
@@ -45,7 +45,7 @@ After fetching, it prints a data audit, then the digest, then drops you into a c
 
 ## How I approached each stage
 
-### Stage 1 — Data fetching and audit
+### Stage 1 : Data fetching and audit
 
 I pull the top 5 stories for the query from the Algolia API, sorted by points so the most upvoted (and usually most discussed) stories come first. For each story I grab up to 15 top-level comment threads and recurse into replies up to depth 5.
 
@@ -58,7 +58,7 @@ Everything gets dumped to `hn_data.json` too, partly so I don't have to re-fetch
 
 One limitation I ran into: the HN Firebase API (`/v0/item/{id}.json`) doesn't give you upvote counts on individual comments. Only stories have a `score` field. So I can't directly rank comments by popularity. My workaround is sorting stories by points (so we look at high-signal threads first) and relying on the order of the `kids` array, which HN sorts roughly by votes already.
 
-### Stage 2 — Chunking and structure
+### Stage 2 : Chunking and structure
 
 This was the trickiest part. HN comments are a tree — replies nested under replies. If you just do `text[:15000]` you'll chop a comment in half and the LLM loses all sense of who's replying to whom.
 
@@ -68,7 +68,7 @@ The budget (15k chars) is split evenly across stories so one massive thread does
 
 I also use the same boundary-aware trimming in the chat phase — when I need to fit raw thread data into the chat context, I cut at story separators (`---`) not in the middle of comments.
 
-### Stage 3 — Digest
+### Stage 3 : Digest
 
 The prompt tells the LLM what the data format means (depth tags = reply nesting, timestamps, etc.) and asks for five sections: consensus points, controversial takes, pros/cons from real experiences, alternatives mentioned, and notable insights.
 
@@ -76,7 +76,7 @@ I also tell the model upfront that there are no per-comment upvote counts and th
 
 For the LLM calls I use a fallback chain — try llama-3.3-70b first, fall back to mixtral, then llama-3.1-8b. Groq's free tier rate-limits individual models pretty aggressively, so having fallbacks means the tool doesn't just die randomly.
 
-### Stage 4 — Chat
+### Stage 4 : Chat
 
 After the digest you can ask questions like "what did people say about write performance?" or "who had actual production experience with this?" The model answers only from the HN data — it's told explicitly not to make stuff up, and to say so if something isn't covered.
 
@@ -84,7 +84,7 @@ For context management I went with a sliding window: keep the last 6 messages, d
 
 I considered summarizing old messages instead of dropping them, but that adds complexity and can compound errors (summaries of summaries get lossy fast). For a focused research chat, 6 turns of history covers most use cases. If someone references something from way earlier in the chat it might be lost — that's a known tradeoff I'm okay with for the simplicity gain.
 
-### Stage 5 — Edge cases
+### Stage 5 : Edge cases
 
 These are handled through the system prompt rules:
 - If the data doesn't have an answer, the model says so instead of making something up
