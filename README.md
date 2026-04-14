@@ -5,6 +5,7 @@ A CLI tool that searches Hacker News threads on any topic, pulls the comments, g
 I built this because HN threads are genuinely useful for making tech decisions, but reading through hundreds of comments to find the good stuff is painful. This automates that.
 ## Demo
 Click to play the video
+
 [![Watch the demo](https://img.youtube.com/vi/pEvVFG8CKtw/maxresdefault.jpg)](https://youtu.be/pEvVFG8CKtw)
 
 ## Setup
@@ -99,7 +100,7 @@ The one gap is very old chat references (past the 6-message window) — those fa
 - **Chat memory is limited** — 6 messages. Old stuff gets dropped.
 - **Character budgets are fixed** — tuned for Groq's context window. Bigger models could handle more data.
 
-## Demo
+## Demo link
 
 https://youtu.be/pEvVFG8CKtw
 
