@@ -1,12 +1,13 @@
 import sys
 import json
+import asyncio
+import aiohttp
 from datetime import datetime, timezone
 
-from fetcher import search_hn_stories, get_hn_item, fetch_comment_tree, stats
+from fetcher import search_hn_stories_async, fetch_json, fetch_comment_tree_async, stats
 from chunker import build_thread_document_chunked, count_comments_in_tree
 from digest import generate_digest
 from chat import chat_loop
-
 
 def save_fetched_data(query, stories_meta, all_trees, filepath="hn_data.json"):
     """Dump everything to JSON so we don't re-fetch while developing."""
@@ -20,7 +21,6 @@ def save_fetched_data(query, stories_meta, all_trees, filepath="hn_data.json"):
     with open(filepath, "w") as f:
         json.dump(payload, f, indent=2)
     print(f"💾 Data saved to {filepath}")
-
 
 def print_audit(query, story_summaries):
     print("\n" + "=" * 50)
@@ -41,12 +41,10 @@ def print_audit(query, story_summaries):
               f"{s['threads_fetched']} top threads, "
               f"{s['total_in_trees']} comments in trees")
 
-    # worth noting for the audit
     print(f"\nNote: HN Firebase API doesn't expose per-comment upvotes.")
     print(f"We use story-level points to prioritize and HN's default sort order.")
 
-
-def main():
+async def main_async():
     query = input(
         "🔍 Enter search topic (or press Enter for 'SQLite in production'): "
     ).strip()
@@ -55,97 +53,111 @@ def main():
 
     print(f"\n📡 Searching HN for: \"{query}\"\n")
 
-    stories = search_hn_stories(query, num_stories=5)
-    if not stories:
-        print("❌ No stories found.")
-        sys.exit(1)
+    async with aiohttp.ClientSession() as session:
+        stories = await search_hn_stories_async(session, query, num_stories=5)
+        if not stories:
+            print("❌ No stories found.")
+            sys.exit(1)
 
-    print(f"Found {len(stories)} stories. Fetching comments...\n")
+        print(f"Found {len(stories)} stories. Fetching comments...\n")
 
-    per_story_budget = 15000 // len(stories)
+        per_story_budget = 15000 // len(stories)
 
-    all_documents = ""
-    story_summaries = []
-    all_trees_serializable = []
+        all_documents = ""
+        story_summaries = []
+        all_trees_serializable = []
 
-    for i, story in enumerate(stories):
-        title = story.get("title", "Untitled")
-        story_id = story.get("objectID")
-        points = story.get("points", 0)
-        url = story.get("url") or ""
-        num_comments = story.get("num_comments", 0)
+        semaphore = asyncio.Semaphore(50)  # Concurrent connection limit
 
-        print(f"  [{i+1}] \"{title}\" ({points} pts, {num_comments} comments)")
-        stats["stories_fetched"] += 1
+        for i, story in enumerate(stories):
+            title = story.get("title", "Untitled")
+            story_id = story.get("objectID")
+            points = story.get("points", 0)
+            url = story.get("url") or ""
+            num_comments = story.get("num_comments", 0)
 
-        item_data = get_hn_item(story_id)
-        if not item_data or "kids" not in item_data:
-            print(f"      ⏭️  No comments, skipping.")
-            continue
+            print(f"  [{i+1}] \"{title}\" ({points} pts, {num_comments} comments)")
+            stats["stories_fetched"] += 1
 
-        stats["stories_with_comments"] += 1
+            item_url = f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json"
+            item_data = await fetch_json(session, item_url)
 
-        trees = []
-        top_comment_ids = item_data["kids"][:15]
+            if not item_data or "kids" not in item_data:
+                print(f"      ⏭️  No comments, skipping.")
+                continue
 
-        print(f"      Fetching comments ", end="")
-        for cid in top_comment_ids:
-            tree = fetch_comment_tree(cid)
-            if tree:
-                trees.append(tree)
-        print()
+            stats["stories_with_comments"] += 1
 
-        if trees:
-            doc = build_thread_document_chunked(title, url, trees, per_story_budget)
-            all_documents += doc + "\n---\n\n"
+            top_comment_ids = item_data["kids"][:15]
+            print(f"      Fetching comments ", end="")
+            sys.stdout.flush()
 
-            all_trees_serializable.append({
-                "story_title": title,
-                "story_url": url,
-                "story_points": points,
-                "trees": trees,
-            })
-            story_summaries.append({
-                "title": title,
-                "points": points,
-                "threads_fetched": len(trees),
-                "total_in_trees": sum(count_comments_in_tree(t) for t in trees),
-            })
+            # Fetch top level threads concurrently
+            tasks = [
+                fetch_comment_tree_async(session, cid, max_depth=5, semaphore=semaphore)
+                for cid in top_comment_ids
+            ]
+            fetched_trees = await asyncio.gather(*tasks)
+            
+            trees = [t for t in fetched_trees if t is not None]
+            print()
 
-    # save raw data
-    stories_meta = [
-        {
-            "title": s.get("title"),
-            "objectID": s.get("objectID"),
-            "points": s.get("points", 0),
-            "url": s.get("url") or "",
-            "num_comments": s.get("num_comments", 0),
-        }
-        for s in stories
-    ]
-    save_fetched_data(query, stories_meta, all_trees_serializable)
+            if trees:
+                doc = build_thread_document_chunked(title, url, trees, per_story_budget)
+                all_documents += doc + "\n---\n\n"
 
-    # audit
-    print_audit(query, story_summaries)
+                all_trees_serializable.append({
+                    "story_title": title,
+                    "story_url": url,
+                    "story_points": points,
+                    "trees": trees,
+                })
+                story_summaries.append({
+                    "title": title,
+                    "points": points,
+                    "threads_fetched": len(trees),
+                    "total_in_trees": sum(count_comments_in_tree(t) for t in trees),
+                })
 
-    if not all_documents.strip():
-        print("\n❌ No comment data to generate digest from.")
-        sys.exit(1)
+        # save raw data
+        stories_meta = [
+            {
+                "title": s.get("title"),
+                "objectID": s.get("objectID"),
+                "points": s.get("points", 0),
+                "url": s.get("url") or "",
+                "num_comments": s.get("num_comments", 0),
+            }
+            for s in stories
+        ]
+        save_fetched_data(query, stories_meta, all_trees_serializable)
 
-    print(f"\nDocument size: {len(all_documents)} chars (chunked at thread boundaries)")
-    print("\n🤖 Generating digest...\n")
+        # audit
+        print_audit(query, story_summaries)
 
-    digest = generate_digest(all_documents)
+        if not all_documents.strip():
+            print("\n❌ No comment data to generate digest from.")
+            sys.exit(1)
 
-    print("\n" + "=" * 50)
-    print("📋 FINAL DIGEST")
-    print("=" * 50)
-    print(digest)
-    print("\n" + "=" * 50)
+        print(f"\nDocument size: {len(all_documents)} chars (chunked at thread boundaries)")
+        print("\n🤖 Generating digest...\n")
 
-    # chat
-    chat_loop(digest, all_documents)
+        digest = generate_digest(all_documents)
 
+        print("\n" + "=" * 50)
+        print("📋 FINAL DIGEST")
+        print("=" * 50)
+        print(digest)
+        print("\n" + "=" * 50)
+
+        # chat
+        chat_loop(digest, all_documents)
+
+def main():
+    # Setup asyncio execution
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
