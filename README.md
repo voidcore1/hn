@@ -30,8 +30,8 @@ Open `.env` and put your key in there. This file is gitignored so it won't get p
 python main.py
 ```
 
-It asks for a topic, hit Enter to go with "SQLite in production". Fetching comments takes a couple minutes because I rate-limit API calls to not get blocked. You'll see progress dots while it works.
-
+It asks for a topic, hit Enter to go with "SQLite in production". 
+Fetching comments is incredibly fast. The tool uses asynchronous concurrent requests (aiohttp + asyncio) with a semaphore to pull entire comment trees in seconds without hitting Firebase API rate limits. You'll see a quick flash of progress dots while it works.
 After fetching, it prints a data audit, then the digest, then drops you into a chat where you can ask follow-ups.
 
 ## Files
@@ -57,6 +57,8 @@ I throw away three kinds of data:
 Everything gets dumped to `hn_data.json` too, partly so I don't have to re-fetch every time while developing, and partly as proof of what data I actually pulled.
 
 One limitation I ran into: the HN Firebase API (`/v0/item/{id}.json`) doesn't give you upvote counts on individual comments. Only stories have a `score` field. So I can't directly rank comments by popularity. My workaround is sorting stories by points (so we look at high-signal threads first) and relying on the order of the `kids` array, which HN sorts roughly by votes already.
+
+Note on performance: Originally, fetching this data took 2-5 minutes because of synchronous blocking requests. I refactored the data acquisition layer to use aiohttp and asyncio. By using an async semaphore capped at 50 concurrent connections, I can fetch the entire nested comment structure concurrently without triggering HN's rate limits.
 
 ### Stage 2 : Chunking and structure
 
@@ -95,7 +97,6 @@ The one gap is very old chat references (past the 6-message window) — those fa
 
 ## Limitations
 
-- **Slow fetching** — rate limiting means it takes 2-5 min to pull everything. Progress dots show it's alive.
 - **No comment upvotes** — API doesn't expose them. Documented above.
 - **Chat memory is limited** — 6 messages. Old stuff gets dropped.
 - **Character budgets are fixed** — tuned for Groq's context window. Bigger models could handle more data.
@@ -106,4 +107,4 @@ https://youtu.be/pEvVFG8CKtw
 
 ## Tech
 
-Python 3, Groq (free tier), HN Algolia + Firebase APIs, BeautifulSoup, python-dotenv
+Python 3, aiohttp / asyncio, Groq (free tier), HN Algolia + Firebase APIs, BeautifulSoup, python-dotenv
